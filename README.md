@@ -1,28 +1,34 @@
 # AI Fake Resume Detector
 
-A machine-learning tool that checks how trustworthy a resume looks. Upload a resume PDF and get a quality report with an authenticity score, job-description relevance, completeness, duplicate-content check and actionable feedback.
+A machine-learning tool that checks how trustworthy a resume looks. Upload a resume PDF and get a quality report with an authenticity score, job-description relevance, completeness, a duplicate-content check and actionable feedback.
 
 ## What it does
 
 | Score | How it is computed |
 |---|---|
-| **Authenticity** | Gradient Boosting model on text-pattern features (unique-word ratio, keyword stuffing, repeated phrases, buzzword ratio, skill density, etc.). A TF-IDF + Logistic Regression model gives a second opinion. |
+| **Authenticity** | Gradient Boosting model on 14 text-pattern features (repetition, keyword stuffing, buzzwords, skills listed vs skills supported elsewhere, copy-pasted lines, senior-title words, etc.). A TF-IDF + Logistic Regression model gives a second opinion. |
 | **Relevance** | TF-IDF cosine similarity between the resume and a job description |
 | **Completeness** | Checks for experience/projects, education, skills, email and phone |
 | **Duplicate similarity** | TF-IDF cosine similarity between two resumes (flags copy-paste above 75%) |
 | **Overall quality** | Weighted blend of the scores above |
 
-## How the model was trained
+## How the model was built
 
-1. Started with a public resume dataset (~9.5k rows); built ~2,500 clean resumes as the "genuine" class.
-2. Created "fake" resumes by injecting three kinds of problems into genuine ones: **keyword stuffing**, **unsupported skills** and **generic buzzword padding**.
+1. Started with a public resume dataset (9,544 rows) and built 2,500 clean resumes as the "genuine" class.
+2. Created "fake" resumes by injecting known manipulations into genuine ones: **keyword stuffing**, **unsupported skills** and **generic buzzword padding**.
 3. Split train/test by source resume (`GroupShuffleSplit`) so a resume and its fake copy never land on both sides.
-4. Compared TF-IDF + Logistic Regression, class-balanced Logistic Regression, and a feature-based Gradient Boosting model using accuracy, precision, recall, F1 and AUC.
-5. Ran a feature ablation (drop one feature at a time) to see which signals matter.
+4. Compared TF-IDF + Logistic Regression with a feature-based Gradient Boosting model (accuracy, precision, recall, F1, AUC), then ran a feature ablation.
+5. Improved the model over three versions and stress-tested each one (see below).
 
-## Results
+## Model versions
 
-Evaluated on a held-out test set of 1,000 resumes, split by source resume so a resume and its fake copy never appear on both sides.
+| Version | What changed | F1 (original test set) |
+|---|---|---|
+| **v2** | 9 text features | 0.914 |
+| **v3** | + 3 features comparing skills listed with skills mentioned elsewhere in the resume | 0.988 |
+| **v4** (used by the app) | removed `n_words`; + copy-pasted-line and senior-title features; trained with extra fake types and long genuine resumes | 0.970 |
+
+### v2 baseline comparison
 
 | model                      |   acc |   prec |   recall |    f1 |   auc |
 |:---------------------------|------:|-------:|---------:|------:|------:|
@@ -30,22 +36,57 @@ Evaluated on a held-out test set of 1,000 resumes, split by source resume so a r
 | Features + GradBoost       | 0.919 |  0.969 |    0.866 | 0.914 | 0.985 |
 | TF-IDF + LogReg (balanced) | 0.934 |  1     |    0.868 | 0.929 | 0.998 |
 
-**Share of fakes caught, by type**
+### v3: the skills features helped on the original fakes
 
-| fake type          | TF-IDF | TF-IDF (balanced) | Features |
-|:-------------------|-------:|------------------:|---------:|
-| generic padding    |  1.000 |             1.000 |    1.000 |
-| keyword stuffing   |  1.000 |             1.000 |    1.000 |
-| unsupported skills |  0.329 |             0.605 |    0.599 |
+| What | v2 (9 features) | v3 (12 features) |
+|---|---|---|
+| F1 | 0.914 | 0.988 |
+| Recall | 0.866 | 0.982 |
+| Unsupported-skills fakes caught | 59.9% | 94.6% |
+| Genuine resumes wrongly flagged | 2.8% | 0.6% |
 
-- Genuine resumes wrongly flagged: 0% (TF-IDF models), 2.8% (features model).
-- Most important feature: `skill_density`. Removing it drops F1 from 0.914 to 0.799.
-- Weakest spot: fakes with unsupported skills, since only about 60% are caught. This is the first thing to improve.
+### Stress tests found two problems with v3
+
+I tested on fake types the model had never seen, and on genuine resumes made twice as long.
+
+| Unseen fake type | v2 caught | v3 caught |
+|---|---|---|
+| `spread_skills` (extra skills, each mentioned once in the experience section) | 99.4% | **33.8%** |
+| `duplicate_section` (experience block copy-pasted) | 39.2% | 33.2% |
+| `title_inflation` (invented senior job titles) | 2.2% | 1.0% |
+
+- **v3 was easier to fool.** It leaned on "unsupported skills", so a fake that mentions each extra skill once looked legitimate.
+- **Length bias.** Genuine resumes made 2x longer were wrongly flagged **16.8%** of the time, against 0.6% at normal length. Removing `n_words` alone barely helped (15.2%).
+
+### v4: fixing the length bias
+
+v4 drops `n_words`, adds `dup_line_ratio` and `senior_terms_per_100w`, and trains on extra fake types plus long genuine resumes (training resumes only).
+
+| Genuine resumes wrongly flagged | v3 | v4 |
+|---|---|---|
+| Normal length | 0.6% | 4.6% |
+| 2x longer | 16.8% | **2.6%** |
+
+Overall v4 test results: accuracy 0.970, precision 0.955, recall 0.986, F1 0.970, AUC 0.996. The length bias is fixed, at the cost of more false alarms on normal-length resumes.
+
+### How well does it catch fakes it has never seen?
+
+Leave-one-fake-type-out: train without one fake type, then test on that type.
+
+| Fake type held out | Caught when never seen | Caught when in training |
+|---|---|---|
+| `spread_skills` | 48.4% | 99.0% |
+| `duplicate_section` | 0.0% | 99.2% |
+| `title_inflation` | 1.0% | 92.6% |
+
+Fakes of the original three types (keyword stuffing, unsupported skills, generic padding) are caught at 95.8% to 100%.
 
 ## Limitations (please read)
 
-- The "fake" labels are **synthetic**. The model learns to spot these specific manipulations, not every kind of fake resume, so high test scores do not guarantee real-world accuracy.
-- Very long resumes can be over-flagged.
+- **The detector recognises the fake patterns it was trained on. It does not generalise to new manipulation types**, as the leave-one-out table shows. Detecting unknown fakes would need real labelled data.
+- The "fake" labels are **synthetic**, generated by my own code, so high test scores do not guarantee real-world accuracy.
+- Training resumes come from structured dataset fields joined into text, which looks different from real PDF resumes. The skills features expect section headings written in capital letters.
+- v4 wrongly flags about 4.6% of normal-length genuine resumes in testing. The decision threshold can be raised to trade recall for fewer false alarms.
 - This is a screening aid, not proof of fraud. Never use it as the only basis for rejecting someone.
 
 ## Run it locally
@@ -61,9 +102,9 @@ Then open http://127.0.0.1:5000 in your browser.
 ## Project structure
 
 ```
-├── app.py                      # Flask web app
+├── app.py                      # Flask web app (model v4)
 ├── models/                     # trained models saved from the notebook
-├── notebooks/                  # Colab notebook (data prep, training, evaluation)
+├── notebooks/                  # Colab notebook (data prep, training, evaluation, stress tests)
 ├── requirements.txt
 └── README.md
 ```
